@@ -1,5 +1,6 @@
 import { createClient } from '@supabase/supabase-js'
 import { Telegraf } from 'telegraf'
+import path from 'path'
 
 console.log('🚀 bot.js стартує')
 
