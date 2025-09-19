@@ -5,7 +5,11 @@ import fs from 'fs'
 import path from 'path'
 
 console.log('🚀 bot.js стартує')
-dotenv.config()
+
+// Локально dotenv підключаємо тільки у development
+if (process.env.NODE_ENV !== 'production') {
+    import('dotenv').then(dotenv => dotenv.config())
+}
 
 const BOT_TOKEN = process.env.BOT_TOKEN
 const SUPABASE_URL = process.env.SUPABASE_URL
@@ -16,9 +20,12 @@ if (!BOT_TOKEN || !SUPABASE_URL || !SUPABASE_KEY) {
     process.exit(1)
 }
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_KEY)
+import { createClient } from '@supabase/supabase-js'
+import { Telegraf } from 'telegraf'
 
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY)
 const bot = new Telegraf(BOT_TOKEN)
+
 
 // ---- state persistence ----
 const STATE_FILE = path.resolve(process.cwd(), 'polling_state.json')
