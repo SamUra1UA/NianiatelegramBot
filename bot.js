@@ -1,14 +1,20 @@
 import { createClient } from '@supabase/supabase-js'
 import { Telegraf } from 'telegraf'
-import path from 'path'
 
 console.log('🚀 bot.js стартує')
 
-// Локально dotenv підключаємо тільки у development
+// ---- dotenv для локальної розробки ----
 if (process.env.NODE_ENV !== 'production') {
-    import('dotenv').then(dotenv => dotenv.config())
+    try {
+        // динамічний імпорт для ESM
+        await import('dotenv').then(dotenv => dotenv.config())
+        console.log('✅ .env завантажено')
+    } catch (err) {
+        console.warn('⚠️ dotenv не підключено:', err)
+    }
 }
 
+// ---- Перевірка env змінних ----
 const BOT_TOKEN = process.env.BOT_TOKEN
 const SUPABASE_URL = process.env.SUPABASE_URL
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY
@@ -18,12 +24,11 @@ if (!BOT_TOKEN || !SUPABASE_URL || !SUPABASE_KEY) {
     process.exit(1)
 }
 
+// ---- Ініціалізація клієнтів ----
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY)
 const bot = new Telegraf(BOT_TOKEN)
 
 
-// ---- state persistence ----
-const STATE_FILE = path.resolve(process.cwd(), 'polling_state.json')
 const defaultState = {
     lastTimestamps: {
         messages: '1970-01-01T00:00:00.000Z',
@@ -31,31 +36,48 @@ const defaultState = {
         order: '1970-01-01T00:00:00.000Z',
     },
 }
+
 let state = { ...defaultState }
 
-function loadState() {
+// Завантаження стану з Supabase
+async function loadState() {
     try {
-        if (fs.existsSync(STATE_FILE)) {
-            const raw = fs.readFileSync(STATE_FILE, 'utf8')
-            state = { ...defaultState, ...JSON.parse(raw) }
-            console.log('🔁 Завантажено стан polling:', state.lastTimestamps)
+        const { data, error } = await supabase
+            .from('bot_state')
+            .select('state')
+            .eq('id', 'polling')
+            .maybeSingle()
+
+        if (error) throw error
+
+        if (data?.state) {
+            state.lastTimestamps = { ...defaultState.lastTimestamps, ...data.state.lastTimestamps }
+            console.log('🔁 Завантажено стан polling з Supabase:', state.lastTimestamps)
         } else {
-            console.log('📂 Файл стану не знайдено, використовую defaultState')
+            console.log('📂 Стану немає, використовую defaultState')
         }
     } catch (err) {
-        console.warn('⚠️ Не вдалося завантажити state:', err)
+        console.warn('⚠️ Не вдалося завантажити стан з Supabase:', err)
         state = { ...defaultState }
     }
 }
-function saveState() {
+
+// Збереження стану у Supabase
+async function saveState() {
     try {
-        fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2))
-        console.log('💾 Збережено стан polling:', state.lastTimestamps)
+        const { error } = await supabase
+            .from('bot_state')
+            .upsert(
+                [{ id: 'polling', state: state }],
+                { onConflict: 'id' }
+            )
+
+        if (error) throw error
+        console.log('💾 Збережено стан polling у Supabase:', state.lastTimestamps)
     } catch (err) {
-        console.warn('⚠️ Не вдалося зберегти state:', err)
+        console.warn('⚠️ Не вдалося зберегти стан у Supabase:', err)
     }
 }
-loadState()
 
 // ==== Сесії для реєстрації користувачів ====
 const sessions = new Map()
@@ -466,18 +488,18 @@ async function pollTableOnce(table, handler) {
         for (const row of data || []) {
             console.log(`➡️ Обробка рядка ${table}:`, row)
             await handler(row)
-            // оновлюємо timestamp до останнього опрацьованого рядка
             state.lastTimestamps[table] = row.created_at
         }
 
         if (data?.length) {
             console.log(`✅ Оновлено lastTimestamps[${table}] = ${state.lastTimestamps[table]}`)
-            saveState()
+            await saveState()
         }
     } catch (err) {
         console.error('pollTableOnce error:', err)
     }
 }
+
 
 function startPolling() {
     console.log('⏱️ Запускаю polling only режим')
@@ -504,6 +526,8 @@ bot.command('testnotify', (ctx) => ctx.reply('🔔 Тестове повідом
 
 async function main() {
     console.log('⏱️ Стартую bot + polling паралельно')
+
+    await loadState() // завантажуємо стан із Supabase перед polling
 
     // Telegram
     bot.launch().then(() => console.log('✅ Telegram бот запущено'))
