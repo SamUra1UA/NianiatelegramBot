@@ -1,8 +1,5 @@
-import dotenv from 'dotenv'
-import { Telegraf, Markup } from 'telegraf'
 import { createClient } from '@supabase/supabase-js'
-import fs from 'fs'
-import path from 'path'
+import { Telegraf } from 'telegraf'
 
 console.log('🚀 bot.js стартує')
 
@@ -19,9 +16,6 @@ if (!BOT_TOKEN || !SUPABASE_URL || !SUPABASE_KEY) {
     console.error('❌ Не задано BOT_TOKEN / SUPABASE_URL / SUPABASE_KEY')
     process.exit(1)
 }
-
-import { createClient } from '@supabase/supabase-js'
-import { Telegraf } from 'telegraf'
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_KEY)
 const bot = new Telegraf(BOT_TOKEN)
