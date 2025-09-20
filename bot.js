@@ -539,5 +539,11 @@ async function main() {
 
 main()
 
+const app = express()
+app.get('/', (req, res) => res.send('✅ OK'))
+
+const PORT = process.env.PORT || 8000
+app.listen(PORT, () => console.log(`Health check listening on ${PORT}`))
+
 process.once('SIGINT', () => bot.stop('SIGINT'))
 process.once('SIGTERM', () => bot.stop('SIGTERM'))
