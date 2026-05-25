@@ -33,7 +33,7 @@ const defaultState = {
         messages: '1970-01-01T00:00:00.000Z',
         babysitter: '1970-01-01T00:00:00.000Z',
         order: '1970-01-01T00:00:00.000Z',
-        chats: '1970-01-01T00:00:00.000Z', // ДОДАНО: Стан для нових чатів
+        chats: '1970-01-01T00:00:00.000Z',
     },
 }
 
@@ -359,10 +359,16 @@ bot.command('testnotify', async (ctx) => {
 })
 
 // ==== Polling (Опитування бази даних) ====
-async function pollTableOnce(table, handler) {
+async function pollTableOnce(table, handler, extraFilter = null) {
     try {
         const last = state.lastTimestamps[table] || defaultState.lastTimestamps[table]
-        const { data, error } = await supabase.from(table).select('*').gt('created_at', last).order('created_at', { ascending: true }).limit(200)
+        let query = supabase.from(table).select('*').gt('created_at', last).order('created_at', { ascending: true }).limit(200)
+
+        if (extraFilter) {
+            query = extraFilter(query)
+        }
+
+        const { data, error } = await query
 
         if (error) return console.error(`❌ Помилка опиту ${table}:`, error)
 
@@ -380,7 +386,7 @@ async function pollTableOnce(table, handler) {
 function startPolling() {
     console.log('⏱️ Запускаю polling режим')
     setInterval(async () => await pollTableOnce('messages', onNewMessage), 10000)
-    setInterval(async () => await pollTableOnce('babysitter', onNewBabysitter), 60000)
+    setInterval(async () => await pollTableOnce('babysitter', onNewBabysitter, (q) => q.eq('is_verified', true)), 60000)
     setInterval(async () => await pollTableOnce('order', onNewOrder), 60000)
     setInterval(async () => await pollTableOnce('chats', onNewChat), 15000) // ДОДАНО: опитування нових чатів
 }
