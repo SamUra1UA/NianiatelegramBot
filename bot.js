@@ -96,6 +96,43 @@ async function sendExpoPushes(tokens, title, body, dataPayload = {}) {
     }
 }
 
+// ========================================================
+// --- ФУНКЦІЯ ДЛЯ ВІДПРАВКИ PUSH-СПОВІЩЕНЬ З РЕЗУЛЬТАТАМИ ---
+// ========================================================
+async function sendExpoPushesWithResult(tokensObj, title, body, dataPayload = {}) {
+    if (!tokensObj || tokensObj.length === 0) return { success: [], failed: [] };
+
+    const messages = tokensObj.map(t => ({
+        to: t.token,
+        sound: 'default',
+        title: title,
+        body: body,
+        data: dataPayload,
+    }));
+
+    const results = { success: [], failed: tokensObj.map(t => t.user_id) };
+
+    try {
+        const res = await fetch('https://exp.host/--/api/v2/push/send', {
+            method: 'POST',
+            headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+            body: JSON.stringify(messages),
+        });
+        const data = await res.json();
+
+        if (data?.data) {
+            results.failed = [];
+            data.data.forEach((ticket, i) => {
+                if (ticket.status === 'ok') results.success.push(tokensObj[i].user_id);
+                else results.failed.push(tokensObj[i].user_id);
+            });
+        }
+    } catch (err) {
+        console.error('❌ Помилка відправки Expo Push:', err);
+    }
+    return results;
+}
+
 // ==== Сесії для реєстрації користувачів (Телеграм) ====
 const sessions = new Map()
 
@@ -272,30 +309,61 @@ async function onNewBabysitter(babysitter) {
 
 // ТИП 2: НОВІ ОГОЛОШЕННЯ У МІСТІ (ДЛЯ НЯНЬ)
 async function onNewOrder(order) {
+    if (order.status !== 'active' && order.status !== 'approved' && order.status !== 'published') return;
+
     try {
         const { data: babysitters } = await supabase.from('babysitter').select('id, location, name, user_id')
         const targetSitters = (babysitters || []).filter((b) => b.location === order.location)
 
-        // 1. Відправка в Telegram
-        for (let b of targetSitters) {
-            const { data: notif } = await supabase.from('telegram_notifications').select('telegram_id, preferences').eq('user_id', b.user_id).eq('user_role', 'babysitter').maybeSingle()
-            if (notif?.preferences?.new_order) {
-                await bot.telegram.sendMessage(notif.telegram_id, `📢 Нове оголошення від батьків у вашому місті: ${order.name}\n\n[Відкрити замовлення](https://www.niania24.com/ua/order/${order.id})`, { parse_mode: 'Markdown' }).catch(console.error)
-            }
+        const sitterIds = targetSitters.map(b => b.user_id);
+        if (sitterIds.length === 0) return;
+
+        const { data: pushTokens } = await supabase.from('expo_tokens').select('token, user_id').in('user_id', sitterIds);
+        const { data: telegramPrefs } = await supabase.from('telegram_notifications').select('telegram_id, user_id, preferences').in('user_id', sitterIds).eq('user_role', 'babysitter').eq('is_active', true);
+
+        let pushResults = { success: [], failed: sitterIds };
+        if (pushTokens && pushTokens.length > 0) {
+            pushResults = await sendExpoPushesWithResult(
+                pushTokens,
+                'Нове замовлення! 👶',
+                `У вашому місті з'явилося нове оголошення: ${order.name || order.title || 'Нове замовлення'}.`,
+                { type: 'order', id: order.id }
+            );
         }
 
-        // 2. Відправка в Мобільний додаток (Expo Push)
-        const sitterIds = targetSitters.map(b => b.user_id);
-        if (sitterIds.length > 0) {
-            const { data: pushTokens } = await supabase.from('expo_tokens').select('token').in('user_id', sitterIds);
-            if (pushTokens && pushTokens.length > 0) {
-                await sendExpoPushes(
-                    pushTokens.map(t => t.token),
-                    'Нове замовлення! 👶',
-                    `У вашому місті з'явилося нове оголошення: ${order.name}.`,
-                    { type: 'order', id: order.id }
-                );
+        for (let b of targetSitters) {
+            const uniqueKey = `new_order:${order.id}:telegram:${b.user_id}`;
+            const { data: existingLog } = await supabase.from('notification_logs').select('id').eq('unique_key', uniqueKey).maybeSingle();
+            if (existingLog) continue;
+
+            let sentPush = pushResults.success.includes(b.user_id);
+            let tgPref = (telegramPrefs || []).find(t => t.user_id === b.user_id);
+            let sentTg = false;
+            let tgError = null;
+
+            if (!sentPush && tgPref && tgPref.preferences?.new_order) {
+                try {
+                    await bot.telegram.sendMessage(
+                        tgPref.telegram_id,
+                        `👶 Нове оголошення у вашому місті\n\nМісто: ${order.location}\nВік дитини: ${order.child_age || '-'}\nГрафік: ${order.schedule || '-'}\nОплата: ${order.price || '-'}\n\n[Переглянути оголошення](https://www.niania24.com/ua/order/${order.id})`,
+                        { parse_mode: 'Markdown' }
+                    );
+                    sentTg = true;
+                } catch (e) {
+                    console.error('Telegram send error:', e);
+                    tgError = e.message;
+                }
             }
+
+            await supabase.from('notification_logs').insert({
+                notification_type: 'new_order',
+                entity_id: order.id,
+                user_id: b.user_id,
+                channel: sentPush ? 'app_push' : (sentTg ? 'telegram' : 'none'),
+                status: sentPush || sentTg ? 'sent' : 'failed',
+                error_message: tgError || (!sentPush ? 'Push failed or no token' : null),
+                unique_key: uniqueKey
+            }).catch(() => {});
         }
     } catch (err) { console.error('onNewOrder error:', err) }
 }
@@ -330,6 +398,63 @@ async function onNewChat(chat) {
             }
         }
     } catch (err) { console.error('onNewChat error:', err) }
+}
+
+// ТИП 5: НОВА СТАТТЯ В БЛОЗІ
+async function onNewArticle(article) {
+    if (!article || !article.title) return; // У таблиці articles немає поля status, тому просто перевіряємо наявність заголовку
+
+    try {
+        const { data: pushTokens } = await supabase.from('expo_tokens').select('token, user_id');
+        const { data: telegramPrefs } = await supabase.from('telegram_notifications').select('telegram_id, user_id').eq('is_active', true);
+
+        const allUserIds = [...new Set([...(pushTokens||[]).map(t => t.user_id), ...(telegramPrefs||[]).map(t => t.user_id)])];
+
+        let pushResults = { success: [], failed: allUserIds };
+        if (pushTokens && pushTokens.length > 0) {
+            pushResults = await sendExpoPushesWithResult(
+                pushTokens,
+                'Нова стаття в блозі 📰',
+                article.title,
+                { type: 'blog', id: article.id }
+            );
+        }
+
+        for (let uid of allUserIds) {
+            const uniqueKey = `blog_article:${article.id}:telegram:${uid}`;
+            const { data: existingLog } = await supabase.from('notification_logs').select('id').eq('unique_key', uniqueKey).maybeSingle();
+            if (existingLog) continue;
+
+            let sentPush = pushResults.success.includes(uid);
+            let tgPref = (telegramPrefs || []).find(t => t.user_id === uid);
+            let sentTg = false;
+            let tgError = null;
+
+            if (!sentPush && tgPref) {
+                try {
+                    let msg = `📰 *Нова стаття в блозі*\n\n*${article.title}*\n`;
+                    if (article.description) msg += `\n${article.description}\n`;
+                    msg += `\n[Читати](https://www.niania24.com/ua/blog/${article.id})`;
+
+                    await bot.telegram.sendMessage(tgPref.telegram_id, msg, { parse_mode: 'Markdown' });
+                    sentTg = true;
+                } catch (e) {
+                    console.error('Telegram send error for blog:', e);
+                    tgError = e.message;
+                }
+            }
+
+            await supabase.from('notification_logs').insert({
+                notification_type: 'blog_article',
+                entity_id: article.id,
+                user_id: uid,
+                channel: sentPush ? 'app_push' : (sentTg ? 'telegram' : 'none'),
+                status: sentPush || sentTg ? 'sent' : 'failed',
+                error_message: tgError || (!sentPush ? 'Push failed or no token' : null),
+                unique_key: uniqueKey
+            }).catch(() => {});
+        }
+    } catch (err) { console.error('onNewArticle error:', err) }
 }
 
 // Пересилання постів із каналу (Залишено без змін)
@@ -389,6 +514,7 @@ function startPolling() {
     setInterval(async () => await pollTableOnce('babysitter', onNewBabysitter, (q) => q.eq('is_verified', true)), 60000)
     setInterval(async () => await pollTableOnce('order', onNewOrder), 60000)
     setInterval(async () => await pollTableOnce('chats', onNewChat), 15000) // ДОДАНО: опитування нових чатів
+    setInterval(async () => await pollTableOnce('articles', onNewArticle), 60000) // ДОДАНО: опитування нових статей блогу
 }
 
 async function main() {
