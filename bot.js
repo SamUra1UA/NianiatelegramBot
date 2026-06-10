@@ -34,6 +34,7 @@ const defaultState = {
         babysitter: '1970-01-01T00:00:00.000Z',
         order: '1970-01-01T00:00:00.000Z',
         chats: '1970-01-01T00:00:00.000Z',
+        articles: new Date().toISOString(), // Тільки нові статті від моменту першого запуску
     },
 }
 
@@ -403,6 +404,14 @@ async function onNewChat(chat) {
 // ТИП 5: НОВА СТАТТЯ В БЛОЗІ
 async function onNewArticle(article) {
     if (!article || !article.title) return; // У таблиці articles немає поля status, тому просто перевіряємо наявність заголовку
+
+    // Безпечна перевірка: не розсилати сповіщення для статей, старших за 24 години
+    const articleDate = new Date(article.created_at);
+    const now = new Date();
+    const diffHours = (now - articleDate) / (1000 * 60 * 60);
+    if (diffHours > 24) {
+        return;
+    }
 
     try {
         const { data: pushTokens } = await supabase.from('expo_tokens').select('token, user_id');
